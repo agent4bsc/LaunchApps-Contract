@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract Agent4Payment is Ownable {
-
+contract Agent4Payment is
+    Ownable2Step,
+    Pausable,
+    ReentrancyGuard
+{
     /* =========================
        STATE
     ========================= */
@@ -15,29 +20,40 @@ contract Agent4Payment is Ownable {
         0.01 ether;
 
     /* =========================
+       RECEIVER TIMELOCK
+    ========================= */
+
+    address public pendingReceiver;
+
+    uint256 public receiverUpdateTime;
+
+    uint256 public constant
+        TIMELOCK_DELAY = 2 days;
+
+    /* =========================
        EVENTS
     ========================= */
 
     event AnalysisPaid(
-
         address indexed user,
         uint256 amount,
         uint256 timestamp
+    );
 
+    event ReceiverProposed(
+        address indexed oldReceiver,
+        address indexed newReceiver,
+        uint256 executeAfter
     );
 
     event ReceiverUpdated(
-
         address indexed oldReceiver,
         address indexed newReceiver
-
     );
 
     event FeeUpdated(
-
         uint256 oldFee,
         uint256 newFee
-
     );
 
     /* =========================
@@ -49,10 +65,13 @@ contract Agent4Payment is Ownable {
     )
         Ownable(msg.sender)
     {
+        require(
+            initialReceiver != address(0),
+            "Invalid receiver"
+        );
 
         paymentReceiver =
             initialReceiver;
-
     }
 
     /* =========================
@@ -62,26 +81,22 @@ contract Agent4Payment is Ownable {
     function payForAnalysis()
         external
         payable
+        nonReentrant
+        whenNotPaused
     {
-
         require(
-
             msg.value >= analysisFee,
-
             "Insufficient payment"
-
         );
 
-        /* =========================
-           SEND PAYMENT
-        ========================= */
+        require(
+            paymentReceiver != address(0),
+            "Receiver not set"
+        );
 
         (bool success, ) =
-
             payable(paymentReceiver).call{
-
                 value: msg.value
-
             }("");
 
         require(
@@ -89,54 +104,90 @@ contract Agent4Payment is Ownable {
             "Payment failed"
         );
 
-        /* =========================
-           EVENT
-        ========================= */
-
         emit AnalysisPaid(
-
             msg.sender,
             msg.value,
             block.timestamp
-
         );
-
     }
 
     /* =========================
-       UPDATE RECEIVER
+       PROPOSE NEW RECEIVER
     ========================= */
 
-    function updateReceiver(
-
+    function proposeReceiver(
         address newReceiver
-
     )
         external
         onlyOwner
     {
+        require(
+            newReceiver != address(0),
+            "Invalid address"
+        );
+
+        pendingReceiver =
+            newReceiver;
+
+        receiverUpdateTime =
+            block.timestamp +
+            TIMELOCK_DELAY;
+
+        emit ReceiverProposed(
+            paymentReceiver,
+            newReceiver,
+            receiverUpdateTime
+        );
+    }
+
+    /* =========================
+       EXECUTE RECEIVER UPDATE
+    ========================= */
+
+    function executeReceiverUpdate()
+        external
+        onlyOwner
+    {
+        require(
+            pendingReceiver != address(0),
+            "No pending receiver"
+        );
 
         require(
-
-            newReceiver != address(0),
-
-            "Invalid address"
-
+            block.timestamp >=
+                receiverUpdateTime,
+            "Timelock active"
         );
 
         address oldReceiver =
             paymentReceiver;
 
         paymentReceiver =
-            newReceiver;
+            pendingReceiver;
+
+        pendingReceiver =
+            address(0);
+
+        receiverUpdateTime = 0;
 
         emit ReceiverUpdated(
-
             oldReceiver,
-            newReceiver
-
+            paymentReceiver
         );
+    }
 
+    /* =========================
+       CANCEL RECEIVER UPDATE
+    ========================= */
+
+    function cancelReceiverUpdate()
+        external
+        onlyOwner
+    {
+        pendingReceiver =
+            address(0);
+
+        receiverUpdateTime = 0;
     }
 
     /* =========================
@@ -149,6 +200,10 @@ contract Agent4Payment is Ownable {
         external
         onlyOwner
     {
+        require(
+            newFee > 0,
+            "Invalid fee"
+        );
 
         uint256 oldFee =
             analysisFee;
@@ -157,12 +212,48 @@ contract Agent4Payment is Ownable {
             newFee;
 
         emit FeeUpdated(
-
             oldFee,
             newFee
-
         );
-
     }
 
+    /* =========================
+       EMERGENCY PAUSE
+    ========================= */
+
+    function pause()
+        external
+        onlyOwner
+    {
+        _pause();
+    }
+
+    function unpause()
+        external
+        onlyOwner
+    {
+        _unpause();
+    }
+
+    /* =========================
+       VIEW
+    ========================= */
+
+    function getRemainingTimelock()
+        external
+        view
+        returns (uint256)
+    {
+        if (
+            receiverUpdateTime == 0 ||
+            block.timestamp >=
+            receiverUpdateTime
+        ) {
+            return 0;
+        }
+
+        return
+            receiverUpdateTime -
+            block.timestamp;
+    }
 }
